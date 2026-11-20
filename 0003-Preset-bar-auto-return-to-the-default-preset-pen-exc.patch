@@ -1,0 +1,297 @@
+From 8091c0498dbacd25b2a51ae2e0e295ff4b037f10 Mon Sep 17 00:00:00 2001
+From: Lecture Pro <lecture-pro@example.invalid>
+Date: Sun, 15 Nov 2026 23:28:31 +0000
+Subject: [PATCH 3/3] Preset bar, auto-return to the default preset,
+ pen-exclusive switch in the reader UI
+
+---
+ src/common/components/preset-bar.js           | 71 +++++++++++++++++++
+ src/common/components/reader-ui.js            | 11 +++
+ src/common/reader.js                          | 37 +++++++++-
+ .../stylesheets/components/_preset-bar.scss   | 71 +++++++++++++++++++
+ src/common/stylesheets/main.scss              |  1 +
+ 5 files changed, 190 insertions(+), 1 deletion(-)
+ create mode 100644 src/common/components/preset-bar.js
+ create mode 100644 src/common/stylesheets/components/_preset-bar.scss
+
+diff --git a/src/common/components/preset-bar.js b/src/common/components/preset-bar.js
+new file mode 100644
+index 0000000..d7d0215
+--- /dev/null
++++ b/src/common/components/preset-bar.js
+@@ -0,0 +1,71 @@
++import React, { Fragment, useState } from 'react';
++import cx from 'classnames';
++import { presetForTool } from '../presets.mjs';
++
++// Lecture Pro: floating bar with one-tap annotation presets (heading, title, fact, bold, ...), the note/image/draw
++// tools and the "pen only" switch (pen annotates, finger scrolls). Hidden in read-only mode.
++function PresetBar({ tool, presets, readOnly, penExclusive, onChangeTool, onSetPenExclusive }) {
++	let [collapsed, setCollapsed] = useState(false);
++	if (readOnly) {
++		return null;
++	}
++
++	let active = presetForTool(presets, tool);
++
++	function presetButton(preset) {
++		return (
++			<button
++				key={preset.id}
++				type="button"
++				className={cx('preset', preset.tool, { active: active?.id === preset.id })}
++				style={{ '--preset-color': preset.color }}
++				title={preset.title}
++				aria-pressed={active?.id === preset.id}
++				onClick={() => onChangeTool({ type: preset.tool, color: preset.color })}
++			>{preset.label}</button>
++		);
++	}
++
++	function toolButton(type, label, title) {
++		return (
++			<button
++				type="button"
++				className={cx('preset', 'tool', { active: tool.type === type })}
++				title={title}
++				aria-pressed={tool.type === type}
++				onClick={() => onChangeTool({ type })}
++			>{label}</button>
++		);
++	}
++
++	return (
++		<div className={cx('preset-bar', { collapsed })} role="toolbar" aria-label="Annotation presets">
++			<button
++				type="button"
++				className="preset-collapse"
++				title={collapsed ? 'Show presets' : 'Hide presets'}
++				onClick={() => setCollapsed(!collapsed)}
++			>{collapsed ? '▴' : '▾'}</button>
++			{!collapsed && (
++				<Fragment>
++					<div className="preset-group">{presets.filter(p => p.tool === 'highlight').map(presetButton)}</div>
++					<div className="preset-group">{presets.filter(p => p.tool === 'underline').map(presetButton)}</div>
++					<div className="preset-group">
++						{toolButton('note', 'Note', 'Sticky note')}
++						{toolButton('image', 'Image', 'Image area')}
++						{toolButton('ink', 'Draw', 'Draw with the pen')}
++					</div>
++					<button
++						type="button"
++						className={cx('preset', 'pen-switch', { active: penExclusive })}
++						title="Pen only: the pen annotates, the finger scrolls and zooms"
++						aria-pressed={!!penExclusive}
++						onClick={() => onSetPenExclusive(!penExclusive)}
++					>Pen only</button>
++				</Fragment>
++			)}
++		</div>
++	);
++}
++
++export default PresetBar;
+diff --git a/src/common/components/reader-ui.js b/src/common/components/reader-ui.js
+index ae02bb8..e4b8fe0 100644
+--- a/src/common/components/reader-ui.js
++++ b/src/common/components/reader-ui.js
+@@ -1,6 +1,7 @@
+ import React, { Fragment, useState, useRef, useImperativeHandle } from 'react';
+ import { LocalizationProvider, ReactLocalization } from "@fluent/react";
+ import Toolbar from './toolbar';
++import PresetBar from './preset-bar';
+ import Sidebar from './sidebar/sidebar';
+ import SelectionPopup from './view-popup/selection-popup';
+ import FindPopup from './view-popup/find-popup';
+@@ -298,6 +299,16 @@ const ReaderUI = React.forwardRef((props, ref) => {
+ 						onOpenContextMenu={props.onOpenReadAloudAnnotationContextMenu}
+ 					/>
+ 				)}
++				{state.presetBar && (
++					<PresetBar
++						tool={state.tool}
++						presets={state.presets}
++						readOnly={state.readOnly}
++						penExclusive={state.penExclusive}
++						onChangeTool={props.onChangeTool}
++						onSetPenExclusive={props.onSetPenExclusive}
++					/>
++				)}
+ 				<div id="a11yAnnouncement" aria-live="polite"></div>
+ 			</Fragment>
+ 		</LocalizationProvider>
+diff --git a/src/common/reader.js b/src/common/reader.js
+index f656237..2c10fd6 100644
+--- a/src/common/reader.js
++++ b/src/common/reader.js
+@@ -40,6 +40,7 @@ import {
+ } from './read-aloud/sdt-segments';
+ import { createPositionMapper } from './sdt/create-position-mapper';
+ import { isSDTPosition } from './types';
++import { DEFAULT_PRESET_ID, normalizePresets, presetAfterAnnotation } from './presets.mjs';
+ import {
+ 	openStructuredDocumentTextPack,
+ 	SDT_PACK_VERSION,
+@@ -251,6 +252,12 @@ class Reader {
+ 			lightTheme,
+ 			darkTheme,
+ 			autoDisableNoteTool: options.autoDisableNoteTool !== undefined ? options.autoDisableNoteTool : true,
++			// Lecture Pro: pen/finger, one-tap presets, back to the default preset after use
++			penExclusive: options.penExclusive ?? false,
++			presetBar: options.presetBar ?? false,
++			presets: normalizePresets(options.presets),
++			defaultPresetId: options.defaultPresetId ?? DEFAULT_PRESET_ID,
++			autoReturnPreset: options.autoReturnPreset ?? false,
+ 			autoDisableTextTool: options.autoDisableTextTool !== undefined ? options.autoDisableTextTool : true,
+ 			autoDisableImageTool: options.autoDisableImageTool !== undefined ? options.autoDisableImageTool : true,
+ 			textSelectionAnnotationMode: options.textSelectionAnnotationMode || 'highlight',
+@@ -409,6 +416,7 @@ class Reader {
+ 						onChangePageNumber={(pageNumber, options) => this._lastView.navigate({ pageNumber }, options)}
+ 						onChangePageIndex={(pageIndex, options) => this._lastView.navigate({ pageIndex }, options)}
+ 						onChangeTool={this.setTool.bind(this)}
++						onSetPenExclusive={this.setPenExclusive.bind(this)}
+ 						onToggleAppearancePopup={this.toggleAppearancePopup.bind(this)}
+ 						enableReadAloud={this._enableReadAloud}
+ 						readAloudManager={this._readAloudManager}
+@@ -968,6 +976,22 @@ class Reader {
+ 		this._updateState({ showAnnotations: enable });
+ 	}
+ 
++	// Lecture Pro: pen-exclusive mode is also forwarded to the views (PDF view and DOM views)
++	setPenExclusive(penExclusive) {
++		penExclusive = !!penExclusive;
++		this._updateState({ penExclusive });
++		this._primaryView?.setPenExclusive(penExclusive);
++		this._secondaryView?.setPenExclusive(penExclusive);
++	}
++
++	setPresetBar(presetBar) {
++		this._updateState({ presetBar: !!presetBar });
++	}
++
++	setAutoReturnPreset(autoReturnPreset) {
++		this._updateState({ autoReturnPreset: !!autoReturnPreset });
++	}
++
+ 	setAutoDisableNoteTool(autoDisable) {
+ 		this._updateState({ autoDisableNoteTool: autoDisable });
+ 	}
+@@ -2017,7 +2041,17 @@ class Reader {
+ 			if (select) {
+ 				this.setSelectedAnnotations([annotation.id], true);
+ 			}
+-			if (
++			// Lecture Pro: after a one-shot preset (heading, bold, ...), a note, text or image go back to the default preset
++			let backTo = this._state.autoReturnPreset && presetAfterAnnotation({
++				presets: this._state.presets,
++				defaultId: this._state.defaultPresetId,
++				tool: this._state.tool,
++				annotationType: annotation.type,
++			});
++			if (backTo) {
++				this.setTool({ type: backTo.tool, color: backTo.color });
++			}
++			else if (
+ 				annotation.type === 'note' && this._state.autoDisableNoteTool
+ 				|| annotation.type === 'text' && this._state.autoDisableTextTool
+ 				|| annotation.type === 'image' && this._state.autoDisableImageTool
+@@ -2156,6 +2190,7 @@ class Reader {
+ 			data,
+ 			platform: this._platform,
+ 			readOnly: this._state.readOnly,
++			penExclusive: this._state.penExclusive,
+ 			preview: this._preview,
+ 			tools: this._tools, // Read-only. Useful for retrieving properties (e.g., size, color) from an inactive tool
+ 			tool: this._state.tool,
+diff --git a/src/common/stylesheets/components/_preset-bar.scss b/src/common/stylesheets/components/_preset-bar.scss
+new file mode 100644
+index 0000000..8b577fb
+--- /dev/null
++++ b/src/common/stylesheets/components/_preset-bar.scss
+@@ -0,0 +1,71 @@
++// Lecture Pro: floating preset bar (see components/preset-bar.js)
++.preset-bar {
++	position: fixed;
++	bottom: 14px;
++	left: 50%;
++	transform: translateX(-50%);
++	z-index: 5;
++	display: flex;
++	flex-wrap: wrap;
++	align-items: center;
++	justify-content: center;
++	gap: 6px 10px;
++	max-width: calc(100% - 24px);
++	padding: 6px 8px;
++	border-radius: 14px;
++	background: var(--material-toolbar);
++	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
++	user-select: none;
++	-webkit-user-select: none;
++
++	&.collapsed {
++		padding: 2px;
++	}
++
++	.preset-group {
++		display: flex;
++		gap: 4px;
++	}
++
++	.preset {
++		min-width: 44px; // large enough for pen and finger
++		height: 44px;
++		padding: 0 8px;
++		border: 2px solid transparent;
++		border-radius: 10px;
++		background: transparent;
++		color: var(--fill-primary);
++		font: 600 14px/1 sans-serif;
++		cursor: pointer;
++		touch-action: manipulation;
++
++		&.highlight {
++			background: var(--preset-color);
++			color: #1a1a1a;
++		}
++
++		&.underline {
++			box-shadow: inset 0 -6px 0 var(--preset-color);
++		}
++
++		&.active {
++			border-color: var(--accent-blue);
++		}
++
++		&.pen-switch.active {
++			background: var(--accent-blue);
++			color: #fff;
++		}
++	}
++
++	.preset-collapse {
++		width: 32px;
++		height: 44px;
++		border: 0;
++		border-radius: 10px;
++		background: transparent;
++		color: var(--fill-secondary);
++		font-size: 16px;
++		cursor: pointer;
++	}
++}
+diff --git a/src/common/stylesheets/main.scss b/src/common/stylesheets/main.scss
+index 4f1fffc..dc26390 100644
+--- a/src/common/stylesheets/main.scss
++++ b/src/common/stylesheets/main.scss
+@@ -29,6 +29,7 @@
+ @import "components/view-popup";
+ @import "components/modal-popup";
+ @import "components/utility-popup";
++@import "components/preset-bar";
+ @import "components/context-menu";
+ @import "components/annotations-view";
+ @import "components/search-box";
+-- 
+2.43.0
+

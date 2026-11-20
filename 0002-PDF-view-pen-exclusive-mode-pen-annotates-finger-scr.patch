@@ -1,0 +1,141 @@
+From 9ebb459cfeb964741defdeeebf88a5a5f220a8bc Mon Sep 17 00:00:00 2001
+From: Lecture Pro <lecture-pro@example.invalid>
+Date: Sun, 15 Nov 2026 23:28:31 +0000
+Subject: [PATCH 2/3] PDF view: pen-exclusive mode (pen annotates, finger
+ scrolls, palm rejection)
+
+---
+ src/pdf/pdf-view.js | 57 +++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 53 insertions(+), 4 deletions(-)
+
+diff --git a/src/pdf/pdf-view.js b/src/pdf/pdf-view.js
+index 39d3e6e..535eda5 100644
+--- a/src/pdf/pdf-view.js
++++ b/src/pdf/pdf-view.js
+@@ -1,5 +1,6 @@
+ import Page from './page';
+ import { p2v, v2p } from './lib/coordinates';
++import { PenInput } from '../common/pen-input.mjs';
+ import {
+ 	getLineSelectionRanges,
+ 	getModifiedSelectionRanges,
+@@ -95,6 +96,8 @@ class PDFView {
+ 		this._password = options.password;
+ 		this._passwordUpdateCallback = null;
+ 		this._tools = options.tools;
++		// Lecture Pro: pen annotates, finger scrolls (see src/common/pen-input.mjs)
++		this._pen = new PenInput({ exclusive: options.penExclusive ?? false });
+ 		this._outline = options.outline;
+ 		this._lightTheme = options.lightTheme;
+ 		this._darkTheme = options.darkTheme;
+@@ -1363,6 +1366,23 @@ class PDFView {
+ 		this._readOnly = readOnly;
+ 	}
+ 
++	// Lecture Pro: pen-exclusive mode. With a drawing tool active the finger keeps scrolling and zooming, only the pen draws/selects.
++	setPenExclusive(penExclusive) {
++		this._pen.setExclusive(penExclusive);
++		this._applyTouchAction();
++	}
++
++	setPenActive() {
++		// Not needed: the pen state is tracked from the pointer events
++	}
++
++	_applyTouchAction() {
++		if (this._options.platform === 'web' && this._tool) {
++			this._iframeWindow.document.getElementById('viewerContainer').style.touchAction
++				= this._tool.type !== 'pointer' && !this._pen.exclusive ? 'none' : 'auto';
++		}
++	}
++
+ 	setTool(tool) {
+ 		if (tool.type === 'hand') {
+ 			this._iframeWindow.PDFViewerApplication.pdfCursorTools.switchTool(1);
+@@ -1371,14 +1391,12 @@ class PDFView {
+ 			this._iframeWindow.PDFViewerApplication.pdfCursorTools.switchTool(0);
+ 		}
+ 
+-		if (this._options.platform === 'web') {
+-			this._iframeWindow.document.getElementById('viewerContainer').style.touchAction = tool.type !== 'pointer' ? 'none' : 'auto';
+-		}
+ 		this._iframeWindow.document.documentElement.toggleAttribute(
+ 			'data-android-annotation-tool',
+ 			this._options.platform === 'android' && !['pointer', 'hand'].includes(tool.type)
+ 		);
+ 		this._tool = tool;
++		this._applyTouchAction();
+ 		this._nativeTextSelection?.updateEnabledState();
+ 		this.updateCursor();
+ 	}
+@@ -2589,6 +2607,21 @@ class PDFView {
+ 	// - Don't allow to select anything under the currently selected element
+ 	// - Move text selection into getSingleSelectedObjectAction
+ 	getActionAtPosition(position, event) {
++		// Lecture Pro: in pen-exclusive mode a finger behaves like the pointer tool (page scrolls, a tap selects an annotation)
++		if (this._pen.fingerActsAsPointer(event.pointerType, this._tool.type) && this._tools?.pointer) {
++			const activeTool = this._tool;
++			this._tool = this._tools.pointer;
++			try {
++				return this._getActionAtPosition(position, event);
++			}
++			finally {
++				this._tool = activeTool;
++			}
++		}
++		return this._getActionAtPosition(position, event);
++	}
++
++	_getActionAtPosition(position, event) {
+ 		// Mouse events don't have pointerType
+ 		let mouse = !event.pointerType || event.pointerType === 'mouse';
+ 		// If using a mouse and not the main button is pressed
+@@ -2774,6 +2807,7 @@ class PDFView {
+ 	}
+ 
+ 	_handlePointerDown(event) {
++		this._pen.pointerDown(event.pointerType);
+ 		if (this._nativeTextSelection?.handlePointerDown(event)) {
+ 			return;
+ 		}
+@@ -2998,6 +3032,19 @@ class PDFView {
+ 		if (this._nativeTextSelection?.shouldDeferEvent(event)) {
+ 			return;
+ 		}
++		// Lecture Pro: pen-exclusive mode decides on its own (null = mode off, keep the original rules below)
++		const penDecision = this._pen.shouldPreventTouchMove({
++			toolType: this._tool.type,
++			targetId: event.target.id,
++			touchEvent: event,
++			actionType: this.action?.type,
++		});
++		if (penDecision !== null) {
++			if (penDecision) {
++				event.preventDefault();
++			}
++			return;
++		}
+ 		if (
+ 			// Prevent default touch action (which is scroll) if any tool is enabled
+ 			this._tool.type !== 'pointer' && event.target.id !== 'viewer'
+@@ -3463,6 +3510,7 @@ class PDFView {
+ 	}
+ 
+ 	_handlePointerUp(event) {
++		this._pen.pointerUp(event.pointerType);
+ 		this._nativeTextSelection?.handlePointerUp();
+ 		if (this._nativeTextSelection?.shouldDeferEvent(event)) {
+ 			this._clearPointerAction();
+@@ -3668,7 +3716,8 @@ class PDFView {
+ 		this._updateViewStats();
+ 	}
+ 
+-	_handlePointerCancel() {
++	_handlePointerCancel(event) {
++		this._pen.pointerUp(event?.pointerType);
+ 		this._nativeTextSelection?.handlePointerUp();
+ 		// Chrome cancels the pointer stream when a native drag operation
+ 		// starts, but the drag events keep driving the current action
+-- 
+2.43.0
+

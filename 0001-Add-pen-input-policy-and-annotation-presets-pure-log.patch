@@ -1,0 +1,322 @@
+From 2e77e8579c88db3ef0a93603e73403a5e3704a6f Mon Sep 17 00:00:00 2001
+From: Lecture Pro <lecture-pro@example.invalid>
+Date: Sun, 15 Nov 2026 23:28:31 +0000
+Subject: [PATCH 1/3] Add pen-input policy and annotation presets (pure logic +
+ tests)
+
+---
+ package.json                   |  2 +-
+ src/common/pen-input.mjs       | 71 ++++++++++++++++++++++++++++++++++
+ src/common/presets.mjs         | 69 +++++++++++++++++++++++++++++++++
+ test/common/pen-input.test.mjs | 61 +++++++++++++++++++++++++++++
+ test/common/presets.test.mjs   | 63 ++++++++++++++++++++++++++++++
+ 5 files changed, 265 insertions(+), 1 deletion(-)
+ create mode 100644 src/common/pen-input.mjs
+ create mode 100644 src/common/presets.mjs
+ create mode 100644 test/common/pen-input.test.mjs
+ create mode 100644 test/common/presets.test.mjs
+
+diff --git a/package.json b/package.json
+index defc8b7..a66eb4c 100644
+--- a/package.json
++++ b/package.json
+@@ -12,7 +12,7 @@
+ 		"build:android": "PDFJS_CONFIG=mobile bash pdfjs/build && webpack --config-name android",
+ 		"start": "webpack-dev-server --mode development --config-name dev",
+ 		"view-dev": "PDFJS_CONFIG=mobile bash pdfjs/build && webpack-dev-server --mode development --config-name view-dev",
+-		"test": "node --test test/pdf/native-text-selection-map.test.mjs test/pdf/scroll-target.test.mjs test/common/sdt-lifecycle.test.cjs test/common/obsidian-mathjax.test.cjs"
++		"test": "node --test test/pdf/native-text-selection-map.test.mjs test/pdf/scroll-target.test.mjs test/common/pen-input.test.mjs test/common/presets.test.mjs test/common/sdt-lifecycle.test.cjs test/common/obsidian-mathjax.test.cjs"
+ 	},
+ 	"license": "AGPL-3.0",
+ 	"browserslist": [
+diff --git a/src/common/pen-input.mjs b/src/common/pen-input.mjs
+new file mode 100644
+index 0000000..5fc3a0d
+--- /dev/null
++++ b/src/common/pen-input.mjs
+@@ -0,0 +1,71 @@
++// "Pen annotates, finger scrolls" (pen-exclusive mode) for the PDF view.
++// Pure decision logic without DOM access, so it can be unit-tested (test/common/pen-input.test.mjs).
++
++/** After the pen lifts, finger touches still count as a resting palm for a moment. */
++export const PALM_GRACE_MS = 700;
++
++export class PenInput {
++	constructor({ exclusive = false } = {}) {
++		this.exclusive = exclusive;
++		this._penDown = false;
++		this._busyUntil = 0;
++	}
++
++	setExclusive(exclusive) {
++		this.exclusive = !!exclusive;
++	}
++
++	pointerDown(pointerType) {
++		if (pointerType === 'pen') {
++			this._penDown = true;
++		}
++	}
++
++	pointerUp(pointerType, now = Date.now()) {
++		if (pointerType === 'pen') {
++			this._penDown = false;
++			this._busyUntil = now + PALM_GRACE_MS;
++		}
++	}
++
++	/** The pen touches the screen or has just been lifted. */
++	penBusy(now = Date.now()) {
++		return this._penDown || now < this._busyUntil;
++	}
++
++	/**
++	 * A finger must not draw or select text with the active tool: for that pointer the view behaves as if the
++	 * pointer tool was active (the page scrolls, a tap selects an annotation).
++	 */
++	fingerActsAsPointer(pointerType, toolType) {
++		return this.exclusive && pointerType === 'touch' && toolType !== 'pointer' && toolType !== 'hand';
++	}
++
++	/**
++	 * Touch.touchType is 'stylus' for a pen on Chrome/Android and Safari/iOS. If a browser does not report it, a single
++	 * touch while a pen pointer is down is taken as the pen.
++	 */
++	isStylusTouch(touchEvent) {
++		const touch = touchEvent?.changedTouches?.[0] ?? touchEvent?.touches?.[0];
++		if (touch?.touchType) {
++			return touch.touchType === 'stylus';
++		}
++		return this._penDown && (touchEvent?.touches?.length ?? 0) <= 1;
++	}
++
++	/**
++	 * Whether `touchmove` must be cancelled (which stops the browser from scrolling).
++	 * Returns null when pen-exclusive mode is off: the caller keeps the original rules.
++	 */
++	shouldPreventTouchMove({ toolType, targetId, touchEvent, actionType, now = Date.now() }) {
++		if (!this.exclusive) {
++			return null;
++		}
++		if (this.isStylusTouch(touchEvent)) {
++			// The pen never scrolls: it draws or selects with the tool, or acts as the pointer on the gray area
++			return toolType !== 'pointer' && targetId !== 'viewer' || actionType === 'selectText';
++		}
++		// Finger: scrolls and pinch-zooms freely, except as a resting palm next to the pen
++		return this.penBusy(now);
++	}
++}
+diff --git a/src/common/presets.mjs b/src/common/presets.mjs
+new file mode 100644
+index 0000000..75bc6b5
+--- /dev/null
++++ b/src/common/presets.mjs
+@@ -0,0 +1,69 @@
++// One-tap annotation presets (tool + color) and the "back to the default preset" rule. Pure logic (test/common/presets.test.mjs).
++
++/**
++ * Defaults match the Lecture Pro plugin: highlights carry the structure (headings, title), underlines carry the
++ * content (fact, bold, example, definition, open question). Colors are Zotero's standard palette.
++ */
++export const DEFAULT_PRESETS = [
++	{ id: 'h1', label: 'H1', title: 'Heading 1', tool: 'highlight', color: '#ffd400' },
++	{ id: 'h2', label: 'H2', title: 'Heading 2', tool: 'highlight', color: '#ff6666' },
++	{ id: 'h3', label: 'H3', title: 'Heading 3', tool: 'highlight', color: '#5fb236' },
++	{ id: 'h4', label: 'H4', title: 'Heading 4', tool: 'highlight', color: '#2ea8e5' },
++	{ id: 'title', label: 'T', title: 'Title (names the note)', tool: 'highlight', color: '#f19837' },
++	{ id: 'fact', label: 'F', title: 'Fact', tool: 'underline', color: '#ffd400' },
++	{ id: 'bold', label: 'B', title: 'Bold (important)', tool: 'underline', color: '#ff6666' },
++	{ id: 'example', label: 'E', title: 'Example', tool: 'underline', color: '#5fb236' },
++	{ id: 'definition', label: 'D', title: 'Definition', tool: 'underline', color: '#2ea8e5' },
++	{ id: 'question', label: '?', title: 'Open question', tool: 'underline', color: '#a28ae5' },
++];
++
++export const DEFAULT_PRESET_ID = 'fact';
++
++/** Annotations that are made once and then return to the default preset. */
++const ONE_SHOT_TYPES = ['note', 'text', 'image'];
++const PRESET_TOOLS = ['highlight', 'underline'];
++
++const sameColor = (a, b) => String(a || '').toLowerCase() === String(b || '').toLowerCase();
++
++/** Keeps only well-formed presets; falls back to the defaults if nothing usable is left. */
++export function normalizePresets(input) {
++	if (!Array.isArray(input)) {
++		return DEFAULT_PRESETS;
++	}
++	const seen = new Set();
++	const presets = input.filter((p) => {
++		const ok = p && typeof p.id === 'string' && p.id && !seen.has(p.id)
++			&& typeof p.label === 'string' && PRESET_TOOLS.includes(p.tool) && /^#[0-9a-f]{6}$/i.test(p.color);
++		if (ok) {
++			seen.add(p.id);
++		}
++		return ok;
++	}).map((p) => ({ title: p.label, ...p }));
++	return presets.length ? presets : DEFAULT_PRESETS;
++}
++
++export const presetById = (presets, id) => presets.find((p) => p.id === id);
++
++/** The preset the given tool currently corresponds to (same tool type and color), if any. */
++export const presetForTool = (presets, tool) => presets.find((p) => p.tool === tool?.type && sameColor(p.color, tool.color));
++
++/**
++ * After an annotation was created: the preset to switch to, or null to leave the tool alone.
++ *  - highlight/underline made with a non-default preset (heading, bold, example, ...): one-shot, back to the default
++ *  - note / text / image annotation: back to the default
++ *  - ink drawings keep the tool; so does the default preset itself; a tool that matches no preset is never touched
++ */
++export function presetAfterAnnotation({ presets, defaultId = DEFAULT_PRESET_ID, tool, annotationType }) {
++	const fallback = presetById(presets, defaultId);
++	if (!fallback) {
++		return null;
++	}
++	if (ONE_SHOT_TYPES.includes(annotationType)) {
++		return tool?.type === annotationType ? fallback : null;
++	}
++	if (PRESET_TOOLS.includes(annotationType)) {
++		const current = presetForTool(presets, tool);
++		return current && current.id !== fallback.id ? fallback : null;
++	}
++	return null;
++}
+diff --git a/test/common/pen-input.test.mjs b/test/common/pen-input.test.mjs
+new file mode 100644
+index 0000000..12e752c
+--- /dev/null
++++ b/test/common/pen-input.test.mjs
+@@ -0,0 +1,61 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++
++import { PALM_GRACE_MS, PenInput } from '../../src/common/pen-input.mjs';
++
++const touch = (touchType, count = 1) => ({
++	changedTouches: [{ touchType }],
++	touches: Array.from({ length: count }, () => ({ touchType })),
++});
++const move = (pen, o) => pen.shouldPreventTouchMove({ toolType: 'highlight', targetId: 'page', ...o });
++
++test('off by default: the caller keeps the original rules (null)', () => {
++	const pen = new PenInput();
++	assert.equal(move(pen, { touchEvent: touch('direct') }), null);
++	assert.equal(pen.fingerActsAsPointer('touch', 'highlight'), false);
++});
++
++test('a finger acts as the pointer tool while a drawing tool is active; pen, mouse and pointer/hand tools are unaffected', () => {
++	const pen = new PenInput({ exclusive: true });
++	assert.equal(pen.fingerActsAsPointer('touch', 'highlight'), true);
++	assert.equal(pen.fingerActsAsPointer('touch', 'underline'), true);
++	assert.equal(pen.fingerActsAsPointer('touch', 'ink'), true);
++	assert.equal(pen.fingerActsAsPointer('touch', 'pointer'), false);
++	assert.equal(pen.fingerActsAsPointer('touch', 'hand'), false);
++	assert.equal(pen.fingerActsAsPointer('pen', 'highlight'), false);
++	assert.equal(pen.fingerActsAsPointer('mouse', 'highlight'), false);
++	pen.setExclusive(false);
++	assert.equal(pen.fingerActsAsPointer('touch', 'highlight'), false);
++});
++
++test('finger scrolls (touchmove is not cancelled), the pen never scrolls', () => {
++	const pen = new PenInput({ exclusive: true });
++	assert.equal(move(pen, { touchEvent: touch('direct') }), false); // finger on the page, tool active: scroll
++	assert.equal(move(pen, { touchEvent: touch('direct', 2) }), false); // pinch-zoom
++	assert.equal(move(pen, { touchEvent: touch('stylus') }), true); // pen draws/selects
++	assert.equal(move(pen, { touchEvent: touch('stylus'), targetId: 'viewer' }), false); // pen on the gray area: pointer behavior
++	assert.equal(move(pen, { touchEvent: touch('stylus'), toolType: 'pointer' }), false);
++	assert.equal(move(pen, { touchEvent: touch('stylus'), toolType: 'pointer', actionType: 'selectText' }), true); // pen text selection
++});
++
++test('palm rejection: no scrolling while the pen is down and for a short moment after it lifts', () => {
++	const pen = new PenInput({ exclusive: true });
++	pen.pointerDown('pen');
++	assert.equal(move(pen, { touchEvent: touch('direct', 2) }), true); // palm touch while writing
++	pen.pointerUp('pen', 1000);
++	assert.equal(move(pen, { touchEvent: touch('direct'), now: 1000 + PALM_GRACE_MS - 1 }), true);
++	assert.equal(move(pen, { touchEvent: touch('direct'), now: 1000 + PALM_GRACE_MS + 1 }), false); // scrolling works again
++	pen.pointerDown('touch');
++	pen.pointerUp('mouse', 5000);
++	assert.equal(pen.penBusy(5001), false); // only the pen counts
++});
++
++test('browsers without touchType: a single touch while a pen pointer is down counts as the pen', () => {
++	const pen = new PenInput({ exclusive: true });
++	const plain = { changedTouches: [{}], touches: [{}] };
++	assert.equal(pen.isStylusTouch(plain), false);
++	pen.pointerDown('pen');
++	assert.equal(pen.isStylusTouch(plain), true);
++	assert.equal(pen.isStylusTouch({ changedTouches: [{}], touches: [{}, {}] }), false);
++	assert.equal(pen.isStylusTouch(undefined), true); // no event details at all: trust the pointer state
++});
+diff --git a/test/common/presets.test.mjs b/test/common/presets.test.mjs
+new file mode 100644
+index 0000000..574f77e
+--- /dev/null
++++ b/test/common/presets.test.mjs
+@@ -0,0 +1,63 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++
++import { DEFAULT_PRESETS, DEFAULT_PRESET_ID, normalizePresets, presetAfterAnnotation, presetForTool } from '../../src/common/presets.mjs';
++
++const P = DEFAULT_PRESETS;
++const tool = (type, color) => ({ type, color });
++const after = (t, annotationType) => presetAfterAnnotation({ presets: P, tool: t, annotationType })?.id ?? null;
++
++test('defaults: headings are highlights 1-4, title is orange, content roles are underlines; ids are unique', () => {
++	assert.deepEqual(P.filter((p) => p.tool === 'highlight').map((p) => p.id), ['h1', 'h2', 'h3', 'h4', 'title']);
++	assert.deepEqual(P.filter((p) => p.tool === 'underline').map((p) => p.id), ['fact', 'bold', 'example', 'definition', 'question']);
++	assert.equal(new Set(P.map((p) => p.id)).size, P.length);
++	assert.equal(P.find((p) => p.id === DEFAULT_PRESET_ID).tool, 'underline');
++});
++
++test('presetForTool matches tool type and color (case-insensitive); the same color means different presets per tool', () => {
++	assert.equal(presetForTool(P, tool('highlight', '#FFD400')).id, 'h1');
++	assert.equal(presetForTool(P, tool('underline', '#ffd400')).id, 'fact');
++	assert.equal(presetForTool(P, tool('underline', '#123456')), undefined);
++	assert.equal(presetForTool(P, tool('pointer')), undefined);
++	assert.equal(presetForTool(P, undefined), undefined);
++});
++
++test('after a heading / bold / example highlight or underline the tool returns to the default preset', () => {
++	assert.equal(after(tool('highlight', '#ffd400'), 'highlight'), 'fact'); // heading 1
++	assert.equal(after(tool('highlight', '#f19837'), 'highlight'), 'fact'); // title
++	assert.equal(after(tool('underline', '#ff6666'), 'underline'), 'fact'); // bold
++	assert.equal(after(tool('underline', '#5fb236'), 'underline'), 'fact'); // example
++});
++
++test('the default preset stays; unknown colors and other tools are never touched; ink keeps drawing', () => {
++	assert.equal(after(tool('underline', '#ffd400'), 'underline'), null); // fact stays active for the next fact
++	assert.equal(after(tool('highlight', '#abcdef'), 'highlight'), null); // custom color: user's choice
++	assert.equal(after(tool('pointer'), 'highlight'), null); // made from the selection popup
++	assert.equal(after(tool('ink', '#ff0000'), 'ink'), null);
++});
++
++test('note, text and image annotations return to the default preset, only when made with that tool', () => {
++	assert.equal(after(tool('note', '#ffd400'), 'note'), 'fact');
++	assert.equal(after(tool('text', '#ffd400'), 'text'), 'fact');
++	assert.equal(after(tool('image', '#ffd400'), 'image'), 'fact');
++	assert.equal(after(tool('pointer'), 'note'), null); // e.g. a note added from the context menu
++});
++
++test('a custom default preset and a missing default', () => {
++	assert.equal(presetAfterAnnotation({ presets: P, defaultId: 'bold', tool: tool('underline', '#ffd400'), annotationType: 'underline' }).id, 'bold');
++	assert.equal(presetAfterAnnotation({ presets: P, defaultId: 'nope', tool: tool('highlight', '#ffd400'), annotationType: 'highlight' }), null);
++});
++
++test('normalizePresets keeps well-formed entries, adds titles, drops duplicates and garbage, falls back to the defaults', () => {
++	const custom = normalizePresets([
++		{ id: 'a', label: 'A', tool: 'highlight', color: '#AABBCC' },
++		{ id: 'a', label: 'dup', tool: 'underline', color: '#112233' },
++		{ id: 'b', label: 'B', tool: 'ink', color: '#112233' },
++		{ id: 'c', label: 'C', tool: 'underline', color: 'red' },
++		null,
++	]);
++	assert.deepEqual(custom, [{ title: 'A', id: 'a', label: 'A', tool: 'highlight', color: '#AABBCC' }]);
++	assert.equal(normalizePresets(undefined), DEFAULT_PRESETS);
++	assert.equal(normalizePresets([]), DEFAULT_PRESETS);
++	assert.equal(normalizePresets([{ id: 1 }]), DEFAULT_PRESETS);
++});
+-- 
+2.43.0
+

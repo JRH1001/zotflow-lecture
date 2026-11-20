@@ -1,0 +1,145 @@
+From 0f5ff6fcf00335b25effac14f795d3b50b7b654e Mon Sep 17 00:00:00 2001
+From: Lecture Pro <lecture-pro@example.invalid>
+Date: Sun, 15 Nov 2026 23:29:02 +0000
+Subject: [PATCH] Lecture Pro Edition: pen-only, preset bar and auto-return
+ settings passed to the reader
+
+---
+ manifest.json                           |  4 ++--
+ src/settings/sections/reader-section.ts | 24 ++++++++++++++++++++++++
+ src/settings/types.ts                   |  9 +++++++++
+ src/types/zotero-reader.d.ts            | 12 ++++++++++++
+ src/ui/reader/local-view.ts             |  3 +++
+ src/ui/reader/view.ts                   |  3 +++
+ 6 files changed, 53 insertions(+), 2 deletions(-)
+
+diff --git a/manifest.json b/manifest.json
+index fdf156a..912ac4a 100644
+--- a/manifest.json
++++ b/manifest.json
+@@ -1,7 +1,7 @@
+ {
+ 	"id": "zotflow",
+-	"name": "ZotFlow",
+-	"version": "1.7.1",
++	"name": "ZotFlow (Lecture Pro Edition)",
++	"version": "1.7.1-lp.1",
+ 	"minAppVersion": "1.13.4",
+ 	"description": "Keep your research in flow!",
+ 	"author": "Xianpi Duan",
+diff --git a/src/settings/sections/reader-section.ts b/src/settings/sections/reader-section.ts
+index 34c1da4..7813863 100644
+--- a/src/settings/sections/reader-section.ts
++++ b/src/settings/sections/reader-section.ts
+@@ -36,6 +36,30 @@ export class ReaderSection {
+                             key: "autoDisableNoteImageTextTools",
+                         },
+                     },
++                    {
++                        name: "Pen only: the pen annotates, the finger scrolls",
++                        desc: "Lecture Pro Edition. With a highlight, underline or drawing tool active, only the pen draws and selects text; the finger scrolls and zooms (and a resting palm is ignored). Requires restart Reader to apply; the reader's bottom bar has a switch for the current session.",
++                        control: {
++                            type: "toggle",
++                            key: "readerPenOnly",
++                        },
++                    },
++                    {
++                        name: "Show the preset bar",
++                        desc: "Lecture Pro Edition. A floating bar at the bottom of the reader with one-tap presets: headings 1-4 and title (highlights), fact, bold, example, definition and open question (underlines), plus the note, image and draw tools. Requires restart Reader to apply.",
++                        control: {
++                            type: "toggle",
++                            key: "readerPresetBar",
++                        },
++                    },
++                    {
++                        name: "Return to the default preset after use",
++                        desc: "Lecture Pro Edition. After a heading, title, bold, example, definition or question annotation, and after a note, text or image annotation, the tool goes back to the default preset (fact: yellow underline). Requires restart Reader to apply.",
++                        control: {
++                            type: "toggle",
++                            key: "readerAutoReturnPreset",
++                        },
++                    },
+                 ],
+             },
+             {
+diff --git a/src/settings/types.ts b/src/settings/types.ts
+index d789c0b..87aa6c8 100644
+--- a/src/settings/types.ts
++++ b/src/settings/types.ts
+@@ -78,6 +78,12 @@ export interface ZotFlowSettings {
+     autoUpdateSourceNotesAfterSync: boolean;
+     autoPurgeTrashedSourceNotes: boolean;
+     autoDisableNoteImageTextTools: boolean;
++    /** Lecture Pro Edition: with a drawing tool active only the pen annotates, the finger keeps scrolling and zooming. */
++    readerPenOnly: boolean;
++    /** Lecture Pro Edition: floating bar with one-tap annotation presets in the reader. */
++    readerPresetBar: boolean;
++    /** Lecture Pro Edition: after a heading/bold/example/note/image annotation return to the default preset (fact). */
++    readerAutoReturnPreset: boolean;
+     epubFontFamily: string;
+     /** CSL renderer: default style id (slug or custom style key). */
+     cslDefaultStyleId: string;
+@@ -157,6 +163,9 @@ export const DEFAULT_SETTINGS: ZotFlowSettings = {
+     autoUpdateSourceNotesAfterSync: true,
+     autoPurgeTrashedSourceNotes: false,
+     autoDisableNoteImageTextTools: true,
++    readerPenOnly: true,
++    readerPresetBar: true,
++    readerAutoReturnPreset: true,
+     epubFontFamily: "",
+     cslDefaultStyleId: "apa",
+     cslDefaultFormat: "markdown",
+diff --git a/src/types/zotero-reader.d.ts b/src/types/zotero-reader.d.ts
+index 4868547..79526b1 100644
+--- a/src/types/zotero-reader.d.ts
++++ b/src/types/zotero-reader.d.ts
+@@ -32,6 +32,18 @@ export interface CreateReaderOptions {
+     autoDisableNoteTool?: boolean;
+     autoDisableTextTool?: boolean;
+     autoDisableImageTool?: boolean;
++    /** Lecture Pro Edition (reader fork) */
++    penExclusive?: boolean;
++    presetBar?: boolean;
++    autoReturnPreset?: boolean;
++    defaultPresetId?: string;
++    presets?: {
++        id: string;
++        label: string;
++        title?: string;
++        tool: "highlight" | "underline";
++        color: string;
++    }[];
+     fontFamily?: string;
+ }
+ 
+diff --git a/src/ui/reader/local-view.ts b/src/ui/reader/local-view.ts
+index 516bc39..9a0c00a 100644
+--- a/src/ui/reader/local-view.ts
++++ b/src/ui/reader/local-view.ts
+@@ -416,6 +416,9 @@ export class LocalReaderView extends ItemView {
+                     autoDisableNoteTool: autoDisable,
+                     autoDisableTextTool: autoDisable,
+                     autoDisableImageTool: autoDisable,
++                    penExclusive: services.settings.readerPenOnly,
++                    presetBar: services.settings.readerPresetBar,
++                    autoReturnPreset: services.settings.readerAutoReturnPreset,
+                     fontFamily: services.settings.epubFontFamily || undefined,
+                     ...themeOverrides,
+                 };
+diff --git a/src/ui/reader/view.ts b/src/ui/reader/view.ts
+index 4737477..0b6ca22 100644
+--- a/src/ui/reader/view.ts
++++ b/src/ui/reader/view.ts
+@@ -537,6 +537,9 @@ export class ZoteroReaderView extends ItemView {
+                 autoDisableNoteTool: autoDisable,
+                 autoDisableTextTool: autoDisable,
+                 autoDisableImageTool: autoDisable,
++                penExclusive: services.settings.readerPenOnly,
++                presetBar: services.settings.readerPresetBar,
++                autoReturnPreset: services.settings.readerAutoReturnPreset,
+                 fontFamily: services.settings.epubFontFamily || undefined,
+                 ...themeOverrides,
+                 ...(isReadOnly ? { readOnly: true } : {}),
+-- 
+2.43.0
+
