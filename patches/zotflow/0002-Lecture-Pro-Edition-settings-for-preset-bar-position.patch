@@ -1,0 +1,142 @@
+From 5b449016fef550a1e1cd37f0e2731c16a1dde2ed Mon Sep 17 00:00:00 2001
+From: Lecture Pro <lp@example.invalid>
+Date: Sun, 22 Nov 2026 13:45:10 +0000
+Subject: [PATCH 2/2] Lecture Pro Edition: settings for preset bar position and
+ pen side button action
+
+---
+ src/settings/sections/reader-section.ts | 44 +++++++++++++++++++++++++
+ src/settings/types.ts                   |  6 ++++
+ src/types/zotero-reader.d.ts            |  2 ++
+ src/ui/reader/local-view.ts             |  2 ++
+ src/ui/reader/view.ts                   |  2 ++
+ 5 files changed, 56 insertions(+)
+
+diff --git a/src/settings/sections/reader-section.ts b/src/settings/sections/reader-section.ts
+index 7813863..1d605ca 100644
+--- a/src/settings/sections/reader-section.ts
++++ b/src/settings/sections/reader-section.ts
+@@ -5,6 +5,27 @@ import type { SettingDefinitionItem } from "obsidian";
+ import type { SettingKey } from "settings/types";
+ 
+ /** Declarative settings for reader integration, behavior, and appearance. */
++/** Actions for the pen's side button (Lecture Pro Edition); "preset:<id>" selects one preset of the preset bar. */
++const PEN_BUTTON_ACTIONS: Record<string, string> = {
++    none: "Do nothing",
++    nextPreset: "Next preset",
++    previousPreset: "Previous preset",
++    defaultPreset: "Back to Fact (default preset)",
++    eraser: "Toggle eraser",
++    pointer: "Toggle select (pointer) tool",
++    penOnly: "Toggle Pen only",
++    "preset:h1": "Preset: Heading 1",
++    "preset:h2": "Preset: Heading 2",
++    "preset:h3": "Preset: Heading 3",
++    "preset:h4": "Preset: Heading 4",
++    "preset:title": "Preset: Title",
++    "preset:fact": "Preset: Fact",
++    "preset:bold": "Preset: Bold",
++    "preset:example": "Preset: Example",
++    "preset:definition": "Preset: Definition",
++    "preset:question": "Preset: Open question",
++};
++
+ export class ReaderSection {
+     constructor(private readonly plugin: ZotFlow) {}
+ 
+@@ -52,6 +73,29 @@ export class ReaderSection {
+                             key: "readerPresetBar",
+                         },
+                     },
++                    {
++                        name: "Preset bar position",
++                        desc: "Lecture Pro Edition. Which screen edge the preset bar sits at. Requires restart Reader to apply.",
++                        control: {
++                            type: "dropdown",
++                            key: "readerPresetBarPosition",
++                            options: {
++                                bottom: "Bottom",
++                                top: "Top",
++                                left: "Left",
++                                right: "Right",
++                            },
++                        },
++                    },
++                    {
++                        name: "Pen side button action",
++                        desc: "Lecture Pro Edition. What a press of the stylus' side button does while reading a PDF. When an action is set, the browser's context menu for that button is suppressed. Requires restart Reader to apply.",
++                        control: {
++                            type: "dropdown",
++                            key: "readerPenButtonAction",
++                            options: PEN_BUTTON_ACTIONS,
++                        },
++                    },
+                     {
+                         name: "Return to the default preset after use",
+                         desc: "Lecture Pro Edition. After a heading, title, bold, example, definition or question annotation, and after a note, text or image annotation, the tool goes back to the default preset (fact: yellow underline). Requires restart Reader to apply.",
+diff --git a/src/settings/types.ts b/src/settings/types.ts
+index 87aa6c8..280107b 100644
+--- a/src/settings/types.ts
++++ b/src/settings/types.ts
+@@ -82,6 +82,10 @@ export interface ZotFlowSettings {
+     readerPenOnly: boolean;
+     /** Lecture Pro Edition: floating bar with one-tap annotation presets in the reader. */
+     readerPresetBar: boolean;
++    /** Lecture Pro Edition: where the preset bar sits in the reader. */
++    readerPresetBarPosition: "bottom" | "top" | "left" | "right";
++    /** Lecture Pro Edition: what the pen's side button does ("none", "nextPreset", "eraser", "preset:h1", ...). */
++    readerPenButtonAction: string;
+     /** Lecture Pro Edition: after a heading/bold/example/note/image annotation return to the default preset (fact). */
+     readerAutoReturnPreset: boolean;
+     epubFontFamily: string;
+@@ -165,6 +169,8 @@ export const DEFAULT_SETTINGS: ZotFlowSettings = {
+     autoDisableNoteImageTextTools: true,
+     readerPenOnly: true,
+     readerPresetBar: true,
++    readerPresetBarPosition: "bottom",
++    readerPenButtonAction: "none",
+     readerAutoReturnPreset: true,
+     epubFontFamily: "",
+     cslDefaultStyleId: "apa",
+diff --git a/src/types/zotero-reader.d.ts b/src/types/zotero-reader.d.ts
+index 79526b1..f41b06e 100644
+--- a/src/types/zotero-reader.d.ts
++++ b/src/types/zotero-reader.d.ts
+@@ -35,6 +35,8 @@ export interface CreateReaderOptions {
+     /** Lecture Pro Edition (reader fork) */
+     penExclusive?: boolean;
+     presetBar?: boolean;
++    presetBarPosition?: "bottom" | "top" | "left" | "right";
++    penButtonAction?: string;
+     autoReturnPreset?: boolean;
+     defaultPresetId?: string;
+     presets?: {
+diff --git a/src/ui/reader/local-view.ts b/src/ui/reader/local-view.ts
+index 9a0c00a..7fffb9f 100644
+--- a/src/ui/reader/local-view.ts
++++ b/src/ui/reader/local-view.ts
+@@ -418,6 +418,8 @@ export class LocalReaderView extends ItemView {
+                     autoDisableImageTool: autoDisable,
+                     penExclusive: services.settings.readerPenOnly,
+                     presetBar: services.settings.readerPresetBar,
++                    presetBarPosition: services.settings.readerPresetBarPosition,
++                    penButtonAction: services.settings.readerPenButtonAction,
+                     autoReturnPreset: services.settings.readerAutoReturnPreset,
+                     fontFamily: services.settings.epubFontFamily || undefined,
+                     ...themeOverrides,
+diff --git a/src/ui/reader/view.ts b/src/ui/reader/view.ts
+index 0b6ca22..67993d4 100644
+--- a/src/ui/reader/view.ts
++++ b/src/ui/reader/view.ts
+@@ -539,6 +539,8 @@ export class ZoteroReaderView extends ItemView {
+                 autoDisableImageTool: autoDisable,
+                 penExclusive: services.settings.readerPenOnly,
+                 presetBar: services.settings.readerPresetBar,
++                presetBarPosition: services.settings.readerPresetBarPosition,
++                penButtonAction: services.settings.readerPenButtonAction,
+                 autoReturnPreset: services.settings.readerAutoReturnPreset,
+                 fontFamily: services.settings.epubFontFamily || undefined,
+                 ...themeOverrides,
+-- 
+2.43.0
+

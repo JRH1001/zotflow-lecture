@@ -1,7 +1,7 @@
-From 8091c0498dbacd25b2a51ae2e0e295ff4b037f10 Mon Sep 17 00:00:00 2001
+From b963e4431d06c3d80c1733942c98e152cb261fb9 Mon Sep 17 00:00:00 2001
 From: Lecture Pro <lecture-pro@example.invalid>
 Date: Sun, 15 Nov 2026 23:28:31 +0000
-Subject: [PATCH 3/3] Preset bar, auto-return to the default preset,
+Subject: [PATCH 3/5] Preset bar, auto-return to the default preset,
  pen-exclusive switch in the reader UI
 
 ---

@@ -1,0 +1,85 @@
+name: Build ZotFlow (Lecture Pro Edition)
+
+# Builds the unmodified upstream ZotFlow + reader at the pinned commits (UPSTREAM.md), applies the patches in
+# patches/ and publishes main.js, manifest.json and styles.css. Run it with: Actions -> Build -> Run workflow,
+# or publish a release/tag (e.g. 1.7.1-lp.1): then the files are attached to that release (installable with BRAT).
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "*"
+
+env:
+  ZOTFLOW_REF: 7e58e5fa43bd389972310a694d96793e7e7200b3 # ZotFlow 1.7.1 (reader submodule e6dfec2)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the patches
+        uses: actions/checkout@v4
+
+      - name: Check out ZotFlow (pinned) with its reader submodules
+        uses: actions/checkout@v4
+        with:
+          repository: duanxianpi/zotflow
+          ref: ${{ env.ZOTFLOW_REF }}
+          path: zotflow
+          submodules: recursive
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Apply the patches
+        # git am applies the numbered series in order (later patches build on earlier ones); ZotFlow first, then its reader
+        run: |
+          git config --global user.name "ci"
+          git config --global user.email "ci@example.invalid"
+          git -C zotflow am "$GITHUB_WORKSPACE"/patches/zotflow/*.patch
+          git -C zotflow/reader/reader am "$GITHUB_WORKSPACE"/patches/reader/*.patch
+
+      - name: Test the new reader logic (pen input, presets, pen button actions)
+        working-directory: zotflow/reader/reader
+        run: node --test test/common/pen-input.test.mjs test/common/presets.test.mjs test/common/pen-actions.test.mjs
+
+      - name: Build (same steps as upstream's release build)
+        working-directory: zotflow
+        run: |
+          npm ci
+          npm run build:ci
+
+      - name: Package
+        run: |
+          mkdir -p out/zotflow
+          cp zotflow/main.js zotflow/manifest.json zotflow/styles.css out/zotflow/
+          (cd out && zip -qr ../zotflow-lecture-pro.zip zotflow)
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: zotflow-lecture-pro
+          path: |
+            zotflow-lecture-pro.zip
+            zotflow/main.js
+            zotflow/manifest.json
+            zotflow/styles.css
+          if-no-files-found: error
+
+      - name: Attach to the release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          files="zotflow/main.js zotflow/manifest.json zotflow/styles.css zotflow-lecture-pro.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" $files --clobber
+          else
+            gh release create "$TAG" $files --title "ZotFlow (Lecture Pro Edition) $TAG" \
+              --notes "Pen-only mode, preset bar and auto-return for the ZotFlow reader. Built from the pinned upstream commits with the patches of this repository."
+          fi

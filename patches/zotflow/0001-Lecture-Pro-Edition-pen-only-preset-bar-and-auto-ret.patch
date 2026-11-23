@@ -1,7 +1,7 @@
-From 0f5ff6fcf00335b25effac14f795d3b50b7b654e Mon Sep 17 00:00:00 2001
+From e8a641f4ba5d8fa277e7540b0387e64708a64120 Mon Sep 17 00:00:00 2001
 From: Lecture Pro <lecture-pro@example.invalid>
 Date: Sun, 15 Nov 2026 23:29:02 +0000
-Subject: [PATCH] Lecture Pro Edition: pen-only, preset bar and auto-return
+Subject: [PATCH 1/2] Lecture Pro Edition: pen-only, preset bar and auto-return
  settings passed to the reader
 
 ---

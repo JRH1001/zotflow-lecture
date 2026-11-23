@@ -1,0 +1,352 @@
+From f56158d6d68aeb9b03249b565ba76946fdea7826 Mon Sep 17 00:00:00 2001
+From: Lecture Pro <lp@example.invalid>
+Date: Sun, 22 Nov 2026 13:44:29 +0000
+Subject: [PATCH 5/5] Pen side button: programmable action (next/previous
+ preset, default preset, eraser, pointer, pen-only, specific preset)
+
+---
+ package.json                     |  2 +-
+ src/common/pen-actions.mjs       | 67 ++++++++++++++++++++++++++++++++
+ src/common/pen-input.mjs         | 34 ++++++++++++++++
+ src/common/reader.js             | 26 +++++++++++++
+ src/pdf/pdf-view.js              | 18 +++++++++
+ test/common/pen-actions.test.mjs | 56 ++++++++++++++++++++++++++
+ test/common/pen-input.test.mjs   | 25 ++++++++++++
+ 7 files changed, 227 insertions(+), 1 deletion(-)
+ create mode 100644 src/common/pen-actions.mjs
+ create mode 100644 test/common/pen-actions.test.mjs
+
+diff --git a/package.json b/package.json
+index a66eb4c..5b57161 100644
+--- a/package.json
++++ b/package.json
+@@ -12,7 +12,7 @@
+ 		"build:android": "PDFJS_CONFIG=mobile bash pdfjs/build && webpack --config-name android",
+ 		"start": "webpack-dev-server --mode development --config-name dev",
+ 		"view-dev": "PDFJS_CONFIG=mobile bash pdfjs/build && webpack-dev-server --mode development --config-name view-dev",
+-		"test": "node --test test/pdf/native-text-selection-map.test.mjs test/pdf/scroll-target.test.mjs test/common/pen-input.test.mjs test/common/presets.test.mjs test/common/sdt-lifecycle.test.cjs test/common/obsidian-mathjax.test.cjs"
++		"test": "node --test test/pdf/native-text-selection-map.test.mjs test/pdf/scroll-target.test.mjs test/common/pen-input.test.mjs test/common/presets.test.mjs test/common/pen-actions.test.mjs test/common/sdt-lifecycle.test.cjs test/common/obsidian-mathjax.test.cjs"
+ 	},
+ 	"license": "AGPL-3.0",
+ 	"browserslist": [
+diff --git a/src/common/pen-actions.mjs b/src/common/pen-actions.mjs
+new file mode 100644
+index 0000000..b3cf970
+--- /dev/null
++++ b/src/common/pen-actions.mjs
+@@ -0,0 +1,67 @@
++// Programmable action for the pen's side button. Pure logic (test/common/pen-actions.test.mjs); reader.js executes the result.
++
++import { presetById, presetForTool } from './presets.mjs';
++
++export const SIMPLE_PEN_ACTIONS = ['none', 'nextPreset', 'previousPreset', 'defaultPreset', 'eraser', 'pointer', 'penOnly'];
++
++/** 'preset:<id>' selects a specific preset. Unknown values become 'none'. */
++export function normalizePenAction(action, presets) {
++	if (SIMPLE_PEN_ACTIONS.includes(action)) {
++		return action;
++	}
++	if (typeof action === 'string' && action.startsWith('preset:') && presetById(presets, action.slice(7))) {
++		return action;
++	}
++	return 'none';
++}
++
++const toolOf = (preset) => ({ type: preset.tool, color: preset.color });
++
++/**
++ * What a press of the side button does now.
++ * Returns null (nothing to do), { type: 'penOnly' } (toggle pen-only mode) or
++ * { type: 'tool', tool, remember } - switch to `tool`; `remember` = keep the current tool so that pressing again
++ * (eraser / pointer toggle) can go back to it.
++ */
++export function resolvePenAction({ action, presets, defaultId, tool, previousTool }) {
++	const current = presetForTool(presets, tool);
++	const fallback = presetById(presets, defaultId) ?? presets[0];
++	// Where a toggle goes back to: the remembered tool, else the default preset, else the plain pointer
++	const backTo = previousTool && previousTool.type !== tool?.type ? previousTool : (fallback ? toolOf(fallback) : { type: 'pointer' });
++
++	switch (action) {
++		case 'penOnly':
++			return { type: 'penOnly' };
++
++		case 'nextPreset':
++		case 'previousPreset': {
++			if (!presets.length) {
++				return null;
++			}
++			const step = action === 'nextPreset' ? 1 : -1;
++			const index = current ? presets.indexOf(current) : (step === 1 ? -1 : 0);
++			const next = presets[(index + step + presets.length) % presets.length];
++			return { type: 'tool', tool: toolOf(next), remember: false };
++		}
++
++		case 'defaultPreset':
++			return fallback && current !== fallback ? { type: 'tool', tool: toolOf(fallback), remember: false } : null;
++
++		case 'eraser':
++		case 'pointer': {
++			// Toggle: first press switches to the tool, the next press returns to what was active before
++			if (tool?.type === action) {
++				return { type: 'tool', tool: backTo, remember: false };
++			}
++			return { type: 'tool', tool: { type: action }, remember: true };
++		}
++
++		default: {
++			if (typeof action === 'string' && action.startsWith('preset:')) {
++				const preset = presetById(presets, action.slice(7));
++				return preset && current !== preset ? { type: 'tool', tool: toolOf(preset), remember: false } : null;
++			}
++			return null; // 'none'
++		}
++	}
++}
+diff --git a/src/common/pen-input.mjs b/src/common/pen-input.mjs
+index 5fc3a0d..396c9df 100644
+--- a/src/common/pen-input.mjs
++++ b/src/common/pen-input.mjs
+@@ -9,6 +9,8 @@ export class PenInput {
+ 		this.exclusive = exclusive;
+ 		this._penDown = false;
+ 		this._busyUntil = 0;
++		this._lastButtons = 0;
++		this._lastBarrelAt = 0;
+ 	}
+ 
+ 	setExclusive(exclusive) {
+@@ -28,6 +30,29 @@ export class PenInput {
+ 		}
+ 	}
+ 
++	/**
++	 * True once per press of the pen's side button: the rising edge of PointerEvent.buttons, whether the pen hovers
++	 * or touches the screen.
++	 */
++	barrelPressed(pointerType, buttons, now = Date.now()) {
++		if (pointerType !== 'pen') {
++			return false;
++		}
++		const down = (buttons & BARREL_BUTTON) !== 0;
++		const rising = down && (this._lastButtons & BARREL_BUTTON) === 0;
++		this._lastButtons = buttons;
++		if (!rising || now - this._lastBarrelAt < BUTTON_DEBOUNCE_MS) {
++			return false;
++		}
++		this._lastBarrelAt = now;
++		return true;
++	}
++
++	/** A context menu right after a side-button press belongs to that press (it should be suppressed if the button has an action). */
++	contextMenuFromBarrel(pointerType, now = Date.now()) {
++		return pointerType === 'pen' || now - this._lastBarrelAt < CONTEXT_MENU_GRACE_MS && this._lastBarrelAt > 0;
++	}
++
+ 	/** The pen touches the screen or has just been lifted. */
+ 	penBusy(now = Date.now()) {
+ 		return this._penDown || now < this._busyUntil;
+@@ -69,3 +94,12 @@ export class PenInput {
+ 		return this.penBusy(now);
+ 	}
+ }
++
++// ---------- the pen's side button ----------
++
++/** PointerEvent.buttons bit of the pen's side (barrel) button. */
++export const BARREL_BUTTON = 2;
++/** One physical press can produce several events: ignore repeats within this time. */
++export const BUTTON_DEBOUNCE_MS = 250;
++/** The browser may open a context menu for the side button a little after the press. */
++export const CONTEXT_MENU_GRACE_MS = 600;
+diff --git a/src/common/reader.js b/src/common/reader.js
+index 08f1a03..3f9e6df 100644
+--- a/src/common/reader.js
++++ b/src/common/reader.js
+@@ -40,6 +40,7 @@ import {
+ } from './read-aloud/sdt-segments';
+ import { createPositionMapper } from './sdt/create-position-mapper';
+ import { isSDTPosition } from './types';
++import { normalizePenAction, resolvePenAction } from './pen-actions.mjs';
+ import { DEFAULT_PRESET_ID, normalizeBarPosition, normalizePresets, presetAfterAnnotation } from './presets.mjs';
+ import {
+ 	openStructuredDocumentTextPack,
+@@ -256,6 +257,7 @@ class Reader {
+ 			penExclusive: options.penExclusive ?? false,
+ 			presetBar: options.presetBar ?? false,
+ 			presetBarPosition: normalizeBarPosition(options.presetBarPosition),
++			penButtonAction: normalizePenAction(options.penButtonAction, normalizePresets(options.presets)),
+ 			presets: normalizePresets(options.presets),
+ 			defaultPresetId: options.defaultPresetId ?? DEFAULT_PRESET_ID,
+ 			autoReturnPreset: options.autoReturnPreset ?? false,
+@@ -989,6 +991,28 @@ class Reader {
+ 		this._updateState({ presetBar: !!presetBar });
+ 	}
+ 
++	// Lecture Pro: the pen's side button runs the configured action (see pen-actions.mjs)
++	handlePenButton() {
++		const result = resolvePenAction({
++			action: this._state.penButtonAction,
++			presets: this._state.presets,
++			defaultId: this._state.defaultPresetId,
++			tool: this._state.tool,
++			previousTool: this._previousTool,
++		});
++		if (!result) {
++			return;
++		}
++		if (result.type === 'penOnly') {
++			this.setPenExclusive(!this._state.penExclusive);
++			return;
++		}
++		if (result.remember) {
++			this._previousTool = { type: this._state.tool.type, color: this._state.tool.color };
++		}
++		this.setTool(result.tool);
++	}
++
+ 	setPresetBarPosition(position) {
+ 		this._updateState({ presetBarPosition: normalizeBarPosition(position) });
+ 	}
+@@ -2196,6 +2220,8 @@ class Reader {
+ 			platform: this._platform,
+ 			readOnly: this._state.readOnly,
+ 			penExclusive: this._state.penExclusive,
++			penButtonAction: this._state.penButtonAction,
++			onPenButton: () => this.handlePenButton(),
+ 			preview: this._preview,
+ 			tools: this._tools, // Read-only. Useful for retrieving properties (e.g., size, color) from an inactive tool
+ 			tool: this._state.tool,
+diff --git a/src/pdf/pdf-view.js b/src/pdf/pdf-view.js
+index 535eda5..69e45ec 100644
+--- a/src/pdf/pdf-view.js
++++ b/src/pdf/pdf-view.js
+@@ -98,6 +98,7 @@ class PDFView {
+ 		this._tools = options.tools;
+ 		// Lecture Pro: pen annotates, finger scrolls (see src/common/pen-input.mjs)
+ 		this._pen = new PenInput({ exclusive: options.penExclusive ?? false });
++		this._penButtonAction = options.penButtonAction ?? 'none';
+ 		this._outline = options.outline;
+ 		this._lightTheme = options.lightTheme;
+ 		this._darkTheme = options.darkTheme;
+@@ -354,6 +355,23 @@ class PDFView {
+ 	async _init() {
+ 		// this._iframeWindow.document.body.draggable = true;
+ 
++		// Lecture Pro: programmable action for the pen's side button. The press is seen while hovering (pointermove) or
++		// touching (pointerdown); the context menu the browser may open for it is suppressed when an action is set.
++		if (this._penButtonAction !== 'none') {
++			const onPenButton = (event) => {
++				if (this._pen.barrelPressed(event.pointerType, event.buttons)) {
++					this._options.onPenButton?.();
++				}
++			};
++			this._iframeWindow.addEventListener('pointerdown', onPenButton, true);
++			this._iframeWindow.addEventListener('pointermove', onPenButton, true);
++			this._iframeWindow.addEventListener('contextmenu', (event) => {
++				if (this._pen.contextMenuFromBarrel(event.pointerType)) {
++					event.preventDefault();
++					event.stopImmediatePropagation();
++				}
++			}, true);
++		}
+ 		this._iframeWindow.addEventListener('contextmenu', this._handleContextMenu.bind(this));
+ 		this._iframeWindow.addEventListener('keyup', this._onKeyUp);
+ 		this._iframeWindow.addEventListener('keydown', this._handleKeyDown.bind(this), true);
+diff --git a/test/common/pen-actions.test.mjs b/test/common/pen-actions.test.mjs
+new file mode 100644
+index 0000000..dc3746f
+--- /dev/null
++++ b/test/common/pen-actions.test.mjs
+@@ -0,0 +1,56 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++
++import { normalizePenAction, resolvePenAction } from '../../src/common/pen-actions.mjs';
++import { DEFAULT_PRESETS } from '../../src/common/presets.mjs';
++
++const P = DEFAULT_PRESETS;
++const run = (action, tool, previousTool) => resolvePenAction({ action, presets: P, defaultId: 'fact', tool, previousTool });
++const fact = { type: 'underline', color: '#ffd400' };
++const h1 = { type: 'highlight', color: '#ffd400' };
++
++test('normalizePenAction accepts the known actions and existing presets; everything else is "none"', () => {
++	for (const a of ['none', 'nextPreset', 'previousPreset', 'defaultPreset', 'eraser', 'pointer', 'penOnly', 'preset:bold']) {
++		assert.equal(normalizePenAction(a, P), a);
++	}
++	for (const bad of [undefined, '', 'nope', 'preset:', 'preset:unknown', 5]) {
++		assert.equal(normalizePenAction(bad, P), 'none');
++	}
++});
++
++test('none does nothing; penOnly toggles the mode', () => {
++	assert.equal(run('none', fact), null);
++	assert.deepEqual(run('penOnly', fact), { type: 'penOnly' });
++});
++
++test('next / previous preset cycle through the bar and wrap around', () => {
++	assert.deepEqual(run('nextPreset', h1), { type: 'tool', tool: { type: 'highlight', color: '#ff6666' }, remember: false }); // h1 -> h2
++	assert.deepEqual(run('previousPreset', h1), { type: 'tool', tool: { type: 'underline', color: '#a28ae5' }, remember: false }); // wraps to the last (question)
++	assert.deepEqual(run('nextPreset', { type: 'underline', color: '#a28ae5' }), { type: 'tool', tool: { type: 'highlight', color: '#ffd400' }, remember: false }); // last -> first
++	assert.equal(run('nextPreset', { type: 'pointer' }).tool.color, '#ffd400'); // no preset active: starts at the first
++	assert.equal(run('previousPreset', { type: 'pointer' }).tool.color, '#a28ae5'); // no preset active: previous starts at the last
++});
++
++test('default preset and specific presets; no-op when already active', () => {
++	assert.deepEqual(run('defaultPreset', h1), { type: 'tool', tool: fact, remember: false });
++	assert.equal(run('defaultPreset', fact), null);
++	assert.deepEqual(run('preset:definition', fact), { type: 'tool', tool: { type: 'underline', color: '#2ea8e5' }, remember: false });
++	assert.equal(run('preset:definition', { type: 'underline', color: '#2ea8e5' }), null);
++	assert.equal(run('preset:gone', fact), null);
++});
++
++test('eraser and pointer toggle: first press switches (and remembers), the next press goes back', () => {
++	assert.deepEqual(run('eraser', h1), { type: 'tool', tool: { type: 'eraser' }, remember: true });
++	assert.deepEqual(run('eraser', { type: 'eraser' }, h1), { type: 'tool', tool: h1, remember: false }); // back to the heading highlight
++	assert.deepEqual(run('eraser', { type: 'eraser' }), { type: 'tool', tool: fact, remember: false }); // nothing remembered: default preset
++	assert.deepEqual(run('pointer', fact), { type: 'tool', tool: { type: 'pointer' }, remember: true });
++	assert.deepEqual(run('pointer', { type: 'pointer' }, fact), { type: 'tool', tool: fact, remember: false });
++	assert.deepEqual(run('pointer', { type: 'pointer' }, { type: 'pointer' }), { type: 'tool', tool: fact, remember: false }); // stale memory is ignored
++});
++
++test('an empty preset list is harmless', () => {
++	assert.equal(resolvePenAction({ action: 'nextPreset', presets: [], defaultId: 'fact', tool: h1 }), null);
++	assert.equal(resolvePenAction({ action: 'defaultPreset', presets: [], defaultId: 'fact', tool: h1 }), null);
++	// toggles still work without presets: they go back to the plain pointer
++	assert.deepEqual(resolvePenAction({ action: 'eraser', presets: [], defaultId: 'fact', tool: { type: 'eraser' } }), { type: 'tool', tool: { type: 'pointer' }, remember: false });
++});
+diff --git a/test/common/pen-input.test.mjs b/test/common/pen-input.test.mjs
+index 12e752c..3a757a9 100644
+--- a/test/common/pen-input.test.mjs
++++ b/test/common/pen-input.test.mjs
+@@ -59,3 +59,28 @@ test('browsers without touchType: a single touch while a pen pointer is down cou
+ 	assert.equal(pen.isStylusTouch({ changedTouches: [{}], touches: [{}, {}] }), false);
+ 	assert.equal(pen.isStylusTouch(undefined), true); // no event details at all: trust the pointer state
+ });
++
++test('side button: one callback per press (rising edge), hovering or touching, debounced, pen only', () => {
++	const pen = new PenInput();
++	assert.equal(pen.barrelPressed('pen', 0, 1000), false);
++	assert.equal(pen.barrelPressed('pen', 2, 2000), true); // press while hovering
++	assert.equal(pen.barrelPressed('pen', 2, 2100), false); // still held: no repeat
++	assert.equal(pen.barrelPressed('pen', 3, 2200), false); // pen touches down while the button is held: same press
++	assert.equal(pen.barrelPressed('pen', 0, 3000), false); // released
++	assert.equal(pen.barrelPressed('pen', 3, 4000), true); // next press, in contact with the screen
++	assert.equal(pen.barrelPressed('pen', 0, 4050), false);
++	assert.equal(pen.barrelPressed('pen', 2, 4100), false); // bounce within 250 ms is ignored
++	assert.equal(pen.barrelPressed('pen', 0, 4200), false);
++	assert.equal(pen.barrelPressed('pen', 2, 5000), true);
++	assert.equal(pen.barrelPressed('mouse', 2, 9000), false); // a mouse right-click is not the pen button
++	assert.equal(pen.barrelPressed('touch', 2, 9500), false);
++});
++
++test('a context menu from the side button is recognized (pen event, or shortly after a press)', () => {
++	const pen = new PenInput();
++	assert.equal(pen.contextMenuFromBarrel('pen', 100), true);
++	assert.equal(pen.contextMenuFromBarrel('mouse', 100), false); // no press yet: a real mouse right-click stays
++	pen.barrelPressed('pen', 2, 1000);
++	assert.equal(pen.contextMenuFromBarrel(undefined, 1300), true); // browser did not report the pointer type
++	assert.equal(pen.contextMenuFromBarrel('mouse', 1700), false);
++});
+-- 
+2.43.0
+

@@ -1,7 +1,7 @@
-From 9ebb459cfeb964741defdeeebf88a5a5f220a8bc Mon Sep 17 00:00:00 2001
+From 0fdb0bfcec35a04d35485eaa037c6dc865ebb124 Mon Sep 17 00:00:00 2001
 From: Lecture Pro <lecture-pro@example.invalid>
 Date: Sun, 15 Nov 2026 23:28:31 +0000
-Subject: [PATCH 2/3] PDF view: pen-exclusive mode (pen annotates, finger
+Subject: [PATCH 2/5] PDF view: pen-exclusive mode (pen annotates, finger
  scrolls, palm rejection)
 
 ---
